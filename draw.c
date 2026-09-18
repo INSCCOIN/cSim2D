@@ -2,123 +2,121 @@
 #include "fb.h"
 #include <math.h>
 #include <stdio.h>
-
-static void project(const Sim *s, float x, float y, int *sx, int *sy)
+#include <stdlib.h>
+static int project(const Sim *s, float x, float y, float z, int *sx, int *sy, float *depth)
 {
-    float dx = x - s->camx;
-    float dy = y - s->camy;
-    *sx = (int)FB_W / 2 + (int)((dx - dy * 0.25f) * s->zoom);
-    *sy = (int)((float)FB_H * 0.70f) - (int)((dy * s->pitch + dx * 0.12f) * s->zoom);
+    float dx = x - s->camx, dy = y - s->camy, dz = z - s->camz;
+    float cy = cosf(s->yaw), syw = sinf(s->yaw);
+    float rx = dx * cy - dz * syw;
+    float rz = dx * syw + dz * cy;
+    if (rz < 0.35f) return 0;
+    *sx = (int)FB_W / 2 + (int)(s->foc * rx / rz);
+    *sy = (int)FB_H / 2 - (int)(s->foc * dy / rz);
+    *depth = rz;
+    return 1;
 }
-
-static uint16_t shade(int col, int lit)
+static uint16_t pal(int col, int lit)
 {
-    int pal[][3] = {
-        {180, 80, 70}, {70, 140, 200}, {80, 170, 90}, {200, 170, 60},
-        {160, 100, 190}, {200, 120, 50}, {90, 90, 100},
-    };
-    int i = (col & 7) % 7;
-    int r = pal[i][0] * lit / 100, g = pal[i][1] * lit / 100, b = pal[i][2] * lit / 100;
-    return rgb565(r, g, b);
+    int t[][3] = {{190,75,60},{60,130,200},{70,165,85},{210,175,55},{150,95,185},{210,115,45},{100,105,115},{220,220,230}};
+    int i = abs(col) % 8;
+    int r = t[i][0]*lit/100, g = t[i][1]*lit/100, b = t[i][2]*lit/100;
+    if (r>255) r=255; if (g>255) g=255; if (b>255) b=255;
+    return rgb565(r,g,b);
 }
-
-static void disc(int cx, int cy, int rx, int ry, uint16_t c)
+static void floor_mode7(const Sim *s)
+{
+    int y, x, hy = (int)FB_H / 2 + 8;
+    float cy = cosf(s->yaw), syw = sinf(s->yaw);
+    for (y = hy; y < (int)FB_H; y++) {
+        float p = (float)(y - hy + 1) / (float)FB_H;
+        float dist = s->camy / (p * 1.35f + 0.02f);
+        float step = dist / s->foc;
+        float wx0 = s->camx + syw * dist - cy * step * (float)FB_W * 0.5f;
+        float wz0 = s->camz + cy * dist + syw * step * (float)FB_W * 0.5f;
+        float dx = cy * step, dz = -syw * step;
+        for (x = 0; x < (int)FB_W; x++) {
+            int ix = (int)floorf(wx0), iz = (int)floorf(wz0);
+            int c = (ix + iz) & 1;
+            int fade = (int)(80.f + 40.f / (1.f + dist * 0.08f));
+            px(x, y, c ? rgb565(fade/3, fade/2, fade/4) : rgb565(fade/4, fade/3, fade/5));
+            wx0 += dx; wz0 += dz;
+        }
+    }
+}
+static void disc(int cx, int cy, int r, uint16_t c, uint16_t hi)
 {
     int y, x;
-    if (rx < 1)
-        rx = 1;
-    if (ry < 1)
-        ry = 1;
-    for (y = -ry; y <= ry; y++) {
-        int w = (int)(rx * sqrtf(1.f - (float)(y * y) / (float)(ry * ry + 1)));
-        for (x = -w; x <= w; x++)
-            px(cx + x, cy + y, c);
-    }
-}
-
-static void box25(const Sim *s, const SimBody *b)
-{
-    int x0, y0, x1, y1, x2, y2, x3, y3;
-    int lift = (int)(b->hh * s->zoom * 0.35f);
-    project(s, b->x - b->hw, b->y - b->hh, &x0, &y0);
-    project(s, b->x + b->hw, b->y - b->hh, &x1, &y1);
-    project(s, b->x + b->hw, b->y + b->hh, &x2, &y2);
-    project(s, b->x - b->hw, b->y + b->hh, &x3, &y3);
-    /* side */
-    fill((x0 < x1 ? x0 : x1), (y0 < y1 ? y0 : y1),
-         abs(x1 - x0) + 1, lift + 4, shade(b->col, 55));
-    /* top face */
-    {
-        int minx = x0, maxx = x0, miny = y0 - lift, maxy = y0 - lift, i;
-        int xs[4] = {x0, x1, x2, x3};
-        int ys[4] = {y0 - lift, y1 - lift, y2 - lift, y3 - lift};
-        for (i = 1; i < 4; i++) {
-            if (xs[i] < minx)
-                minx = xs[i];
-            if (xs[i] > maxx)
-                maxx = xs[i];
-            if (ys[i] < miny)
-                miny = ys[i];
-            if (ys[i] > maxy)
-                maxy = ys[i];
+    if (r < 1) r = 1;
+    if (r > 80) r = 80;
+    for (y = -r; y <= r; y++) {
+        int w = (int)sqrtf((float)(r*r - y*y));
+        for (x = -w; x <= w; x++) {
+            float nx = x/(float)r, ny = y/(float)r;
+            float nz = 1.f - nx*nx - ny*ny;
+            px(cx+x, cy+y, (nz > 0.45f && nx < -0.1f && ny < -0.1f) ? hi : c);
         }
-        fill(minx, miny, maxx - minx + 1, maxy - miny + 1, shade(b->col, 90));
-        rect(minx, miny, maxx - minx + 1, maxy - miny + 1, shade(b->col, 40));
     }
 }
-
+static void draw_box(const Sim *s, const SimBody *b)
+{
+    float hx=b->hx, hy=b->hy, hz=b->hz;
+    float P[8][3] = {
+        {b->x-hx,b->y-hy,b->z-hz},{b->x+hx,b->y-hy,b->z-hz},
+        {b->x+hx,b->y-hy,b->z+hz},{b->x-hx,b->y-hy,b->z+hz},
+        {b->x-hx,b->y+hy,b->z-hz},{b->x+hx,b->y+hy,b->z-hz},
+        {b->x+hx,b->y+hy,b->z+hz},{b->x-hx,b->y+hy,b->z+hz}
+    };
+    int S[8][2], ok[8], i;
+    int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
+    float d; int minx=999,miny=999,maxx=-999,maxy=-999;
+    for (i=0;i<8;i++) ok[i]=project(s,P[i][0],P[i][1],P[i][2],&S[i][0],&S[i][1],&d);
+    for (i=0;i<8;i++) if (ok[i]) {
+        if (S[i][0]<minx) minx=S[i][0]; if (S[i][0]>maxx) maxx=S[i][0];
+        if (S[i][1]<miny) miny=S[i][1]; if (S[i][1]>maxy) maxy=S[i][1];
+    }
+    if (maxx<minx) return;
+    if (maxx-minx>220) maxx=minx+220;
+    if (maxy-miny>220) maxy=miny+220;
+    fill(minx,miny,maxx-minx+1,maxy-miny+1, pal(b->col,72));
+    for (i=0;i<12;i++) {
+        int a=edges[i][0], c=edges[i][1];
+        if (ok[a]&&ok[c]) line(S[a][0],S[a][1],S[c][0],S[c][1], pal(b->col,35));
+    }
+}
 void sim_draw(const Sim *s)
 {
-    int i, gx, gy;
-    uint16_t sky = rgb565(18, 22, 36), dirt = rgb565(42, 48, 40);
+    int i,j,n=s->n,ord[SIM_MAX];
+    float depth[SIM_MAX];
     char buf[64];
-    fb_clear(sky);
-    /* ground grid in world y=0 plane, x across */
-    for (gx = -20; gx <= 20; gx++) {
-        int x0, y0, x1, y1;
-        project(s, (float)gx, 0, &x0, &y0);
-        project(s, (float)gx, 0.02f, &x1, &y1);
-        line(x0, y0, x0 + 40, y0 + (int)(12 * s->pitch), dirt);
+    fb_clear(rgb565(12,16,28));
+    fill(0,0,(int)FB_W,(int)FB_H/2+8, rgb565(16,20,34));
+    floor_mode7(s);
+    for (i=0;i<n;i++) {
+        int sx,sy; float d=1e9f;
+        ord[i]=i;
+        if (!project(s,s->b[i].x,s->b[i].y,s->b[i].z,&sx,&sy,&d)) d=1e8f;
+        depth[i]=d;
     }
-    for (gy = 0; gy <= 8; gy++) {
-        int x0, y0, x1, y1;
-        project(s, -16, (float)gy * 0.0f + gy * 0.01f, &x0, &y0);
-        project(s, 16, gy * 0.01f, &x1, &y1);
-        line(x0, y0 + gy * 3, x1, y1 + gy * 3, rgb565(36, 40, 48));
+    for (i=1;i<n;i++) {
+        int k=ord[i]; float d=depth[k];
+        j=i;
+        while (j>0 && depth[ord[j-1]]<d) { ord[j]=ord[j-1]; j--; }
+        ord[j]=k;
     }
-    /* far to near: sort by x+y crude */
-    {
-        int ord[SIM_MAX], n = s->n;
-        for (i = 0; i < n; i++)
-            ord[i] = i;
-        for (i = 1; i < n; i++) {
-            int j, k = ord[i];
-            float d = s->b[k].x + s->b[k].y;
-            j = i;
-            while (j > 0 && s->b[ord[j - 1]].x + s->b[ord[j - 1]].y < d) {
-                ord[j] = ord[j - 1];
-                j--;
-            }
-            ord[j] = k;
-        }
-        for (i = 0; i < n; i++) {
-            const SimBody *b = &s->b[ord[i]];
-            int sx, sy;
-            project(s, b->x, b->y, &sx, &sy);
-            if (b->shape == SIM_CIRCLE) {
-                int rx = (int)(b->r * s->zoom);
-                int ry = (int)(b->r * s->zoom * s->pitch);
-                disc(sx, sy, rx, ry < 2 ? 2 : ry, shade(b->col, 85));
-                disc(sx - rx / 4, sy - ry / 4, rx / 3, ry / 3, shade(b->col, 110));
-            } else
-                box25(s, b);
-        }
+    for (i=0;i<n;i++) {
+        const SimBody *b=&s->b[ord[i]];
+        int sx,sy; float d;
+        if (!project(s,b->x,b->y,b->z,&sx,&sy,&d)) continue;
+        if (b->shape==SIM_SPHERE) {
+            int r=(int)(s->foc * b->r / d);
+            disc(sx,sy,r, pal(b->col,88), pal(b->col,120));
+        } else draw_box(s,b);
     }
-    fill(0, 0, (int)FB_W, 16, rgb565(10, 12, 20));
-    fill(0, (int)FB_H - 14, (int)FB_W, 14, rgb565(10, 12, 20));
-    text(6, 4, "cSim2D", rgb565(200, 180, 80));
-    snprintf(buf, sizeof buf, "bodies %d", s->n);
-    text(80, 4, buf, rgb565(200, 200, 210));
-    text(6, (int)FB_H - 11, "arrows kick  +/- zoom  Q", rgb565(140, 145, 160));
+    fill(0,0,(int)FB_W,16,rgb565(8,10,18));
+    fill(0,(int)FB_H-14,(int)FB_W,14,rgb565(8,10,18));
+    text(4,4,"cSim2D", rgb565(220,190,70));
+    snprintf(buf,sizeof buf,"n=%d", s->n);
+    text(70,4,buf,rgb565(200,200,210));
+    text(4,(int)FB_H-11,"WASD move  QE yaw  space hop  R reset  X quit", rgb565(140,145,160));
     fb_flip();
 }
