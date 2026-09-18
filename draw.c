@@ -213,8 +213,28 @@ void sim_draw(const Sim *s)
     fill(0, 0, (int)FB_W, 16, rgb565(8, 10, 18));
     fill(0, (int)FB_H - 14, (int)FB_W, 14, rgb565(8, 10, 18));
     text(4, 4, "cSim2D", rgb565(220, 190, 70));
-    snprintf(buf, sizeof buf, "n=%d j=%d f=%.0f", s->n, s->nj, s->foc);
+    snprintf(buf, sizeof buf, "n=%d j=%d hit=%d %.0ffps", s->n, s->nj, s->ncontact, s->fps);
     text(70, 4, buf, rgb565(200, 200, 210));
+    if (s->debug) {
+        for (i = 0; i < n; i++) {
+            int x0, y0, x1, y1;
+            float d;
+            const SimBody *b = &s->b[i];
+            if (!project(s, b->x - b->hx, b->y + b->hy, b->z - b->hz, &x0, &y0, &d)) continue;
+            if (!project(s, b->x + b->hx, b->y - b->hy, b->z + b->hz, &x1, &y1, &d)) continue;
+            rect(x0 < x1 ? x0 : x1, y0 < y1 ? y0 : y1,
+                 abs(x1 - x0) + 1, abs(y1 - y0) + 1,
+                 b->awake ? rgb565(80, 220, 80) : rgb565(80, 80, 80));
+        }
+        for (i = 0; i < s->nj; i++) {
+            int x0, y0, x1, y1;
+            float d;
+            const SimBody *a = &s->b[s->j[i].a], *b = &s->b[s->j[i].b];
+            if (project(s, a->x, a->y, a->z, &x0, &y0, &d)
+                && project(s, b->x, b->y, b->z, &x1, &y1, &d))
+                line(x0, y0, x1, y1, rgb565(255, 200, 40));
+        }
+    }
     text(4, (int)FB_H - 11, "WASD  QE yaw  space  +/- zoom  R  X", rgb565(140, 145, 160));
     fb_flip();
 }

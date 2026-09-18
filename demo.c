@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/time.h>
 
 static struct termios oldt;
 static int raw, player;
@@ -57,8 +58,16 @@ int main(void)
         fprintf(stderr, "cSim2D needs /dev/fb0\n");
         return 1;
     }
-    scene(&s);
+    if (!sim_load(&s, "/home/working/cSim2D/demo.scene")
+        && !sim_load(&s, "demo.scene"))
+        scene(&s);
+    if (s.n)
+        player = 0;
     io_open();
+    {
+        float acc = 0;
+        struct timeval tv0, tv1;
+        gettimeofday(&tv0, NULL);
     while (run) {
         unsigned char b[16];
         int n = (int)read(0, b, sizeof b), i;
@@ -74,7 +83,13 @@ int main(void)
             else if (c == ' ') fy = 1;
             else if (c == '+' || c == '=') { s.foc *= 1.12f; if (s.foc > 420) s.foc = 420; }
             else if (c == '-' || c == '_') { s.foc /= 1.12f; if (s.foc < 90) s.foc = 90; }
-            else if (c == 'r' || c == 'R') scene(&s);
+            else if (c == 'r' || c == 'R') {
+                if (!sim_load(&s, "/home/working/cSim2D/demo.scene")
+                    && !sim_load(&s, "demo.scene"))
+                    scene(&s);
+                player = 0;
+            } else if (c == '1')
+                s.debug ^= 1;
             else if (c == 'x' || c == 'X') run = 0;
             if (c == 0x1b && i + 2 < n) i += 2;
         }
@@ -83,10 +98,23 @@ int main(void)
             float kz = (-fx * sy + fz * cy) * 18.f;
             sim_kick(&s, player, kx, fy * 28.f, kz);
         }
-        sim_step(&s, 1.f / 60.f);
+        gettimeofday(&tv1, NULL);
+        {
+            float frame = (tv1.tv_sec - tv0.tv_sec) + (tv1.tv_usec - tv0.tv_usec) * 1e-6f;
+            if (frame < 0.001f) frame = 0.001f;
+            if (frame > 0.05f) frame = 0.05f;
+            s.fps = 1.f / frame;
+            acc += frame;
+            tv0 = tv1;
+        }
+        while (acc >= 1.f / 60.f) {
+            sim_step(&s, 1.f / 60.f);
+            acc -= 1.f / 60.f;
+        }
         sim_cam_follow(&s, player);
         sim_draw(&s);
-        usleep(16000);
+        usleep(8000);
+    }
     }
     io_close();
     fb_close();

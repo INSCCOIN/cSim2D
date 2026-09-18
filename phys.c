@@ -5,6 +5,7 @@
 #define CELL 2.0f
 #define GDIM 32
 #define BUCK 8
+static int g_hit;
 
 void sim_init(Sim *s)
 {
@@ -37,6 +38,7 @@ int sim_add_sphere(Sim *s, float x, float y, float z, float r, float m)
     b->iI = b->I > 0 ? 1.f / b->I : 0;
     b->e = 0.35f; b->mu = 0.4f;
     b->shape = SIM_SPHERE; b->awake = 1;
+    b->layer = 1; b->mask = 0xffffffffu;
     b->col = s->n * 41;
     return s->n++;
 }
@@ -56,6 +58,7 @@ int sim_add_box(Sim *s, float x, float y, float z, float sx, float sy, float sz,
     b->iI = b->I > 0 ? 1.f / b->I : 0;
     b->e = 0.18f; b->mu = 0.5f;
     b->shape = SIM_BOX; b->awake = 1;
+    b->layer = 1; b->mask = 0xffffffffu;
     b->col = s->n * 41;
     return s->n++;
 }
@@ -163,6 +166,11 @@ static void resolve(SimBody *a, SimBody *b, float nx, float ny, float nz,
     if (!b->awake && !b->static_) wake(b);
     im = a->im + b->im;
     if (im <= 0.f) return;
+    g_hit++;
+    if (a->shape == SIM_BOX && fabsf(ny) < 0.5f)
+        a->wp += nz * 0.8f, a->wr += nx * 0.8f;
+    if (b->shape == SIM_BOX && fabsf(ny) < 0.5f)
+        b->wp -= nz * 0.8f, b->wr -= nx * 0.8f;
     /* slop so contacts don't weld */
     {
         float corr = pen - 0.012f;
@@ -405,6 +413,7 @@ static void pair(SimBody *a, SimBody *b)
 {
     if (a->static_ && b->static_) return;
     if (!a->awake && !b->awake && !a->static_ && !b->static_) return;
+    if (!((a->mask & b->layer) && (b->mask & a->layer))) return;
     if (a->shape == SIM_SPHERE && b->shape == SIM_SPHERE) {
         float dx = b->x - a->x, dy = b->y - a->y, dz = b->z - a->z;
         float d = sqrtf(dx * dx + dy * dy + dz * dz), r = a->r + b->r;
@@ -430,57 +439,88 @@ static void floor_hit(Sim *s, SimBody *b)
     b->vx *= (1.f - s->gmu * 0.35f);
     b->vz *= (1.f - s->gmu * 0.35f);
     b->wy *= (1.f - s->gmu * 0.2f);
-    /* sit-flat: spring pitch/roll back to 0 on the ground */
-    b->wp -= b->pitch * 18.f * 0.016f;
-    b->wr -= b->roll * 18.f * 0.016f;
-    b->wp *= 0.85f;
-    b->wr *= 0.85f;
+    /* sit-flat only if not already tumbling hard */
+    if (fabsf(b->wp) + fabsf(b->wr) < 2.5f) {
+        b->wp -= b->pitch * 18.f * 0.016f;
+        b->wr -= b->roll * 18.f * 0.016f;
+        b->wp *= 0.85f;
+        b->wr *= 0.85f;
+    }
     if (fabsf(b->vy) < 0.35f) b->vy = 0;
+    /* tumble onto a face when tipped past ~50° */
+    if (b->shape == SIM_BOX) {
+        float t;
+        if (fabsf(b->pitch) > 0.9f) {
+            t = b->hy; b->hy = b->hz; b->hz = t;
+            b->pitch = 0; b->wp = 0;
+            b->r = sqrtf(b->hx * b->hx + b->hy * b->hy + b->hz * b->hz);
+        } else if (fabsf(b->roll) > 0.9f) {
+            t = b->hy; b->hy = b->hx; b->hx = t;
+            b->roll = 0; b->wr = 0;
+            b->r = sqrtf(b->hx * b->hx + b->hy * b->hy + b->hz * b->hz);
+        }
+    }
 }
 
-static void joints(Sim *s)
+static void joints(Sim *s, float dt)
 {
-    int i;
-    for (i = 0; i < s->nj; i++) {
-        SimJoint *j = &s->j[i];
-        SimBody *a = &s->b[j->a], *b = &s->b[j->b];
-        float px, pz, qx, qz, dx, dy, dz, d, n, im, corr;
-        wake(a); wake(b);
-        if (j->type == J_DIST || j->type == J_HINGE) {
+    int i, pass;
+    float h = dt > 1e-4f ? dt : 1.f / 60.f;
+    for (pass = 0; pass < 8; pass++) {
+        for (i = 0; i < s->nj; i++) {
+            SimJoint *j = &s->j[i];
+            SimBody *a = &s->b[j->a], *b = &s->b[j->b];
+            float px, pz, qx, qz, dx, dy, dz, d, n, im, C, vn, Jimp, baum;
+            float pax, pay, paz, pbx, pby, pbz;
+            wake(a); wake(b);
             if (j->type == J_HINGE) {
-                rot_xz(a->yaw, j->lax, j->laz, &px, &pz); px += a->x; pz += a->z;
-                rot_xz(b->yaw, j->lbx, j->lbz, &qx, &qz); qx += b->x; qz += b->z;
-                dx = qx - px; dy = (b->y - a->y); dz = qz - pz;
-                d = sqrtf(dx * dx + dy * dy + dz * dz);
+                rot_xz(a->yaw, j->lax, j->laz, &px, &pz);
+                pax = a->x + px; pay = a->y; paz = a->z + pz;
+                rot_xz(b->yaw, j->lbx, j->lbz, &qx, &qz);
+                pbx = b->x + qx; pby = b->y; pbz = b->z + qz;
                 n = 0.02f;
-            } else {
-                dx = b->x - a->x; dy = b->y - a->y; dz = b->z - a->z;
-                d = sqrtf(dx * dx + dy * dy + dz * dz);
+            } else if (j->type == J_DIST) {
+                pax = a->x; pay = a->y; paz = a->z;
+                pbx = b->x; pby = b->y; pbz = b->z;
                 n = j->rest;
+            } else {
+                float rx = b->x - a->x, ry = b->y - a->y, rz = b->z - a->z;
+                float along = rx * j->ax + ry * j->ay + rz * j->az;
+                dx = rx - along * j->ax;
+                dy = ry - along * j->ay;
+                dz = rz - along * j->az;
+                d = sqrtf(dx * dx + dy * dy + dz * dz);
+                im = a->im + b->im;
+                if (im <= 0.f || d < 1e-5f) continue;
+                dx /= d; dy /= d; dz /= d;
+                vn = (b->vx - a->vx) * dx + (b->vy - a->vy) * dy + (b->vz - a->vz) * dz;
+                Jimp = -(vn + 0.2f * d / h) / im;
+                a->vx -= a->im * Jimp * dx; a->vy -= a->im * Jimp * dy; a->vz -= a->im * Jimp * dz;
+                b->vx += b->im * Jimp * dx; b->vy += b->im * Jimp * dy; b->vz += b->im * Jimp * dz;
+                continue;
             }
+            dx = pbx - pax; dy = pby - pay; dz = pbz - paz;
+            d = sqrtf(dx * dx + dy * dy + dz * dz);
             if (d < 1e-4f) continue;
-            corr = d - n;
-            im = a->im + b->im;
-            if (im <= 0) continue;
             dx /= d; dy /= d; dz /= d;
-            a->x += dx * corr * (a->im / im);
-            a->y += dy * corr * (a->im / im);
-            a->z += dz * corr * (a->im / im);
-            b->x -= dx * corr * (b->im / im);
-            b->y -= dy * corr * (b->im / im);
-            b->z -= dz * corr * (b->im / im);
-        } else {
-            float rx = b->x - a->x, ry = b->y - a->y, rz = b->z - a->z;
-            float along = rx * j->ax + ry * j->ay + rz * j->az;
-            float px2 = rx - along * j->ax, py2 = ry - along * j->ay, pz2 = rz - along * j->az;
+            C = d - n;
             im = a->im + b->im;
-            if (im <= 0) continue;
-            a->x += px2 * (a->im / im);
-            a->y += py2 * (a->im / im);
-            a->z += pz2 * (a->im / im);
-            b->x -= px2 * (b->im / im);
-            b->y -= py2 * (b->im / im);
-            b->z -= pz2 * (b->im / im);
+            if (im <= 0.f) continue;
+            vn = (b->vx - a->vx) * dx + (b->vy - a->vy) * dy + (b->vz - a->vz) * dz;
+            baum = 0.2f * C / h;
+            Jimp = -(vn + baum) / im;
+            a->vx -= a->im * Jimp * dx; a->vy -= a->im * Jimp * dy; a->vz -= a->im * Jimp * dz;
+            b->vx += b->im * Jimp * dx; b->vy += b->im * Jimp * dy; b->vz += b->im * Jimp * dz;
+            /* small positional slop */
+            if (fabsf(C) > 0.02f) {
+                float corr = C * 0.25f;
+                a->x += dx * corr * (a->im / im);
+                a->y += dy * corr * (a->im / im);
+                a->z += dz * corr * (a->im / im);
+                b->x -= dx * corr * (b->im / im);
+                b->y -= dy * corr * (b->im / im);
+                b->z -= dz * corr * (b->im / im);
+            }
         }
     }
 }
@@ -490,6 +530,7 @@ void sim_step(Sim *s, float dt)
     int i, k;
     int buck[GDIM][GDIM][BUCK], nb[GDIM][GDIM];
     if (dt > 0.025f) dt = 0.025f;
+    g_hit = 0;
     memset(nb, 0, sizeof nb);
     for (k = 0; k < 3; k++) {
         float h = dt / 3.f;
@@ -524,6 +565,30 @@ void sim_step(Sim *s, float dt)
             } else b->sleep = 0;
         }
         sweep_spheres(s);
+        /* box-box sweep: if a box moved far, test previous AABB vs others */
+        for (i = 0; i < s->n; i++) {
+            SimBody *a = &s->b[i];
+            float trav;
+            int j;
+            if (a->shape != SIM_BOX || a->static_ || !a->awake) continue;
+            trav = fabsf(a->x - a->px) + fabsf(a->y - a->py) + fabsf(a->z - a->pz);
+            if (trav < 0.15f) continue;
+            for (j = 0; j < s->n; j++) {
+                float t;
+                SimBody *b = &s->b[j];
+                if (i == j || b->shape != SIM_BOX) continue;
+                if (seg_aabb(a->px, a->py, a->pz, a->x, a->y, a->z,
+                             b->x - b->hx - a->hx, b->y - b->hy - a->hy, b->z - b->hz - a->hz,
+                             b->x + b->hx + a->hx, b->y + b->hy + a->hy, b->z + b->hz + a->hz, &t)) {
+                    if (t > 0.f && t < 1.f) {
+                        a->x = a->px + (a->x - a->px) * t;
+                        a->y = a->py + (a->y - a->py) * t;
+                        a->z = a->pz + (a->z - a->pz) * t;
+                        box_box(a, b);
+                    }
+                }
+            }
+        }
         memset(nb, 0, sizeof nb);
         for (i = 0; i < s->n; i++) {
             float rad = s->b[i].r + 0.05f;
@@ -546,7 +611,46 @@ void sim_step(Sim *s, float dt)
                         buck[u][v][nb[u][v]++] = i;
                 }
         }
-        joints(s);
+        joints(s, h);
         for (i = 0; i < s->n; i++) floor_hit(s, &s->b[i]);
     }
+    s->ncontact = g_hit;
+}
+
+int sim_ray(const Sim *s, float ox, float oy, float oz,
+            float dx, float dy, float dz, float maxd, float *hit)
+{
+    int i, best = -1;
+    float bestt = maxd;
+    float L = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (L < 1e-6f) return -1;
+    dx /= L; dy /= L; dz /= L;
+    for (i = 0; i < s->n; i++) {
+        const SimBody *b = &s->b[i];
+        float t = 0, px, py, pz, d;
+        px = b->x - ox; py = b->y - oy; pz = b->z - oz;
+        t = px * dx + py * dy + pz * dz;
+        if (t < 0.f || t > bestt) continue;
+        px = ox + dx * t - b->x;
+        py = oy + dy * t - b->y;
+        pz = oz + dz * t - b->z;
+        d = sqrtf(px * px + py * py + pz * pz);
+        if (d <= b->r) {
+            bestt = t;
+            best = i;
+        }
+    }
+    if (hit) *hit = bestt;
+    return best;
+}
+
+int sim_query(const Sim *s, float x, float y, float z, float r, int *out, int max)
+{
+    int i, n = 0;
+    for (i = 0; i < s->n && n < max; i++) {
+        float dx = s->b[i].x - x, dy = s->b[i].y - y, dz = s->b[i].z - z;
+        if (dx * dx + dy * dy + dz * dz <= (r + s->b[i].r) * (r + s->b[i].r))
+            out[n++] = i;
+    }
+    return n;
 }
