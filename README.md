@@ -80,6 +80,9 @@ s.camx; s.camy; s.camz;   /* metres */
 s.yaw;                    /* rad, 0 looks +Z */
 s.foc;                    /* ~210 px, larger = zoom */
 s.gy;                     /* default -22 */
+s.ge; s.gmu;              /* ground bounce / friction */
+s.b[id].e; s.b[id].mu;    /* body restitution / friction */
+s.b[id].yaw;              /* box heading (rad) */
 ```
 
 Read a body: `s.b[id].x`, `.y`, `.z`, `.vx`, `.vy`, `.vz`. Write pose if you must (teleport), then let `sim_step` run.
