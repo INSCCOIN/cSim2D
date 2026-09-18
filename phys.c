@@ -267,47 +267,137 @@ static int sphere_box(SimBody *sp, SimBody *bx)
     return 1;
 }
 
+static float proj_extent(const SimBody *b, float ax, float az)
+{
+    float c = cosf(b->yaw), si = sinf(b->yaw);
+    float rx = c, rz = si;       /* +X local */
+    float fx = -si, fz = c;      /* +Z local */
+    return b->hx * fabsf(rx * ax + rz * az) + b->hz * fabsf(fx * ax + fz * az);
+}
+
 static int box_box(SimBody *a, SimBody *b)
 {
-    /* Y slab + XZ as circles of inradius if yawed much, else AABB */
     float ay0 = a->y - a->hy, ay1 = a->y + a->hy;
     float by0 = b->y - b->hy, by1 = b->y + b->hy;
-    float oy, ox, oz, pen, nx, ny, nz, px, py, pz;
-    if (ay1 < by0 || by1 < ay0) return 0;
+    float oy, pen = 1e9f, nx = 1, ny = 0, nz = 0;
+    float axes[5][2];
+    int i;
+    if (ay1 < by0 || by1 < ay0)
+        return 0;
     oy = fminf(ay1, by1) - fmaxf(ay0, by0);
-    {
-        float ax0 = a->x - a->hx, ax1 = a->x + a->hx;
-        float bx0 = b->x - b->hx, bx1 = b->x + b->hx;
-        float az0 = a->z - a->hz, az1 = a->z + a->hz;
-        float bz0 = b->z - b->hz, bz1 = b->z + b->hz;
-        if (fabsf(a->yaw) > 0.05f || fabsf(b->yaw) > 0.05f) {
-            float dx = b->x - a->x, dz = b->z - a->z;
-            float d = sqrtf(dx * dx + dz * dz);
-            float ra = sqrtf(a->hx * a->hx + a->hz * a->hz) * 0.78f;
-            float rb = sqrtf(b->hx * b->hx + b->hz * b->hz) * 0.78f;
-            if (d < 1e-4f || d >= ra + rb) {
-                if (oy < 0.02f) return 0;
-            } else {
-                pen = ra + rb - d;
-                if (oy < pen) {
-                    pen = oy; nx = 0; ny = (a->y < b->y) ? 1.f : -1.f; nz = 0;
-                } else {
-                    nx = dx / d; ny = 0; nz = dz / d;
-                }
-                px = (a->x + b->x) * 0.5f; py = (a->y + b->y) * 0.5f; pz = (a->z + b->z) * 0.5f;
-                resolve(a, b, nx, ny, nz, px, py, pz, pen);
-                return 1;
+    axes[0][0] = cosf(a->yaw);
+    axes[0][1] = sinf(a->yaw);
+    axes[1][0] = -sinf(a->yaw);
+    axes[1][1] = cosf(a->yaw);
+    axes[2][0] = cosf(b->yaw);
+    axes[2][1] = sinf(b->yaw);
+    axes[3][0] = -sinf(b->yaw);
+    axes[3][1] = cosf(b->yaw);
+    axes[4][0] = 0;
+    axes[4][1] = 0; /* Y handled separately */
+    for (i = 0; i < 4; i++) {
+        float ax = axes[i][0], az = axes[i][1];
+        float ac = a->x * ax + a->z * az;
+        float bc = b->x * ax + b->z * az;
+        float ea = proj_extent(a, ax, az), eb = proj_extent(b, ax, az);
+        float overlap = (ea + eb) - fabsf(bc - ac);
+        if (overlap <= 0.f)
+            return 0;
+        if (overlap < pen) {
+            pen = overlap;
+            nx = ax;
+            ny = 0;
+            nz = az;
+            if ((b->x - a->x) * nx + (b->z - a->z) * nz < 0) {
+                nx = -nx;
+                nz = -nz;
             }
         }
-        if (ax1 < bx0 || bx1 < ax0 || az1 < bz0 || bz1 < az0) return 0;
-        ox = fminf(ax1, bx1) - fmaxf(ax0, bx0);
-        oz = fminf(az1, bz1) - fmaxf(az0, bz0);
-        pen = ox; nx = (a->x < b->x) ? 1.f : -1.f; ny = 0; nz = 0;
-        if (oy < pen) { pen = oy; nx = 0; ny = (a->y < b->y) ? 1.f : -1.f; nz = 0; }
-        if (oz < pen) { pen = oz; nx = 0; ny = 0; nz = (a->z < b->z) ? 1.f : -1.f; }
-        px = (a->x + b->x) * 0.5f; py = (a->y + b->y) * 0.5f; pz = (a->z + b->z) * 0.5f;
-        resolve(a, b, nx, ny, nz, px, py, pz, pen);
-        return 1;
+    }
+    if (oy < pen) {
+        pen = oy;
+        nx = 0;
+        ny = (a->y < b->y) ? 1.f : -1.f;
+        nz = 0;
+    }
+    resolve(a, b, nx, ny, nz, (a->x + b->x) * 0.5f, (a->y + b->y) * 0.5f,
+            (a->z + b->z) * 0.5f, pen);
+    return 1;
+}
+
+static int seg_aabb(float x0, float y0, float z0, float x1, float y1, float z1,
+                    float xmn, float ymn, float zmn, float xmx, float ymx, float zmx, float *t)
+{
+    float tmin = 0.f, tmax = 1.f, d, t1, t2;
+    d = x1 - x0;
+    if (fabsf(d) < 1e-8f) {
+        if (x0 < xmn || x0 > xmx) return 0;
+    } else {
+        t1 = (xmn - x0) / d;
+        t2 = (xmx - x0) / d;
+        if (t1 > t2) { float u = t1; t1 = t2; t2 = u; }
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return 0;
+    }
+    d = y1 - y0;
+    if (fabsf(d) < 1e-8f) {
+        if (y0 < ymn || y0 > ymx) return 0;
+    } else {
+        t1 = (ymn - y0) / d;
+        t2 = (ymx - y0) / d;
+        if (t1 > t2) { float u = t1; t1 = t2; t2 = u; }
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return 0;
+    }
+    d = z1 - z0;
+    if (fabsf(d) < 1e-8f) {
+        if (z0 < zmn || z0 > zmx) return 0;
+    } else {
+        t1 = (zmn - z0) / d;
+        t2 = (zmx - z0) / d;
+        if (t1 > t2) { float u = t1; t1 = t2; t2 = u; }
+        if (t1 > tmin) tmin = t1;
+        if (t2 < tmax) tmax = t2;
+        if (tmin > tmax) return 0;
+    }
+    *t = tmin;
+    return 1;
+}
+
+static void sweep_spheres(Sim *s)
+{
+    int i, j;
+    for (i = 0; i < s->n; i++) {
+        SimBody *sp = &s->b[i];
+        float dx, dy, dz, trav;
+        if (sp->shape != SIM_SPHERE || sp->static_ || !sp->awake)
+            continue;
+        dx = sp->x - sp->px;
+        dy = sp->y - sp->py;
+        dz = sp->z - sp->pz;
+        trav = sqrtf(dx * dx + dy * dy + dz * dz);
+        if (trav < 0.12f)
+            continue;
+        for (j = 0; j < s->n; j++) {
+            SimBody *bx = &s->b[j];
+            float lx0, lz0, lx1, lz1, t;
+            if (i == j || bx->shape != SIM_BOX)
+                continue;
+            local_xz(bx->yaw, sp->px - bx->x, sp->pz - bx->z, &lx0, &lz0);
+            local_xz(bx->yaw, sp->x - bx->x, sp->z - bx->z, &lx1, &lz1);
+            if (seg_aabb(lx0, sp->py - bx->y, lz0, lx1, sp->y - bx->y, lz1,
+                         -bx->hx - sp->r, -bx->hy - sp->r, -bx->hz - sp->r,
+                         bx->hx + sp->r, bx->hy + sp->r, bx->hz + sp->r, &t)) {
+                if (t > 0.f && t < 1.f) {
+                    sp->x = sp->px + dx * t;
+                    sp->y = sp->py + dy * t;
+                    sp->z = sp->pz + dz * t;
+                    sphere_box(sp, bx);
+                }
+            }
+        }
     }
 }
 
@@ -340,6 +430,11 @@ static void floor_hit(Sim *s, SimBody *b)
     b->vx *= (1.f - s->gmu * 0.35f);
     b->vz *= (1.f - s->gmu * 0.35f);
     b->wy *= (1.f - s->gmu * 0.2f);
+    /* sit-flat: spring pitch/roll back to 0 on the ground */
+    b->wp -= b->pitch * 18.f * 0.016f;
+    b->wr -= b->roll * 18.f * 0.016f;
+    b->wp *= 0.85f;
+    b->wr *= 0.85f;
     if (fabsf(b->vy) < 0.35f) b->vy = 0;
 }
 
@@ -402,34 +497,54 @@ void sim_step(Sim *s, float dt)
             SimBody *b = &s->b[i];
             float spd;
             if (b->static_ || !b->awake) continue;
+            b->px = b->x; b->py = b->y; b->pz = b->z;
             b->vy += s->gy * h;
             b->vx *= 0.9993f; b->vz *= 0.9993f; b->wy *= 0.997f;
+            b->wp *= 0.99f; b->wr *= 0.99f;
             b->x += b->vx * h; b->y += b->vy * h; b->z += b->vz * h;
             b->yaw += b->wy * h;
+            b->pitch += b->wp * h;
+            b->roll += b->wr * h;
+            if (b->pitch > 0.6f) b->pitch = 0.6f;
+            if (b->pitch < -0.6f) b->pitch = -0.6f;
+            if (b->roll > 0.6f) b->roll = 0.6f;
+            if (b->roll < -0.6f) b->roll = -0.6f;
+            /* airborne sit-flat is weaker */
+            b->wp -= b->pitch * 8.f * h;
+            b->wr -= b->roll * 8.f * h;
             floor_hit(s, b);
-            spd = fabsf(b->vx) + fabsf(b->vy) + fabsf(b->vz) + fabsf(b->wy);
+            spd = fabsf(b->vx) + fabsf(b->vy) + fabsf(b->vz) + fabsf(b->wy) + fabsf(b->wp) + fabsf(b->wr);
             if (spd < 0.05f) {
                 if (++b->sleep > 20) {
-                    b->awake = 0; b->vx = b->vy = b->vz = b->wy = 0;
+                    b->awake = 0;
+                    b->vx = b->vy = b->vz = b->wy = b->wp = b->wr = 0;
+                    b->pitch *= 0.5f;
+                    b->roll *= 0.5f;
                 }
             } else b->sleep = 0;
         }
+        sweep_spheres(s);
         memset(nb, 0, sizeof nb);
         for (i = 0; i < s->n; i++) {
-            int cx = (int)floorf(s->b[i].x / CELL) + GDIM / 2;
-            int cz = (int)floorf(s->b[i].z / CELL) + GDIM / 2;
+            float rad = s->b[i].r + 0.05f;
+            int x0 = (int)floorf((s->b[i].x - rad) / CELL) + GDIM / 2;
+            int x1 = (int)floorf((s->b[i].x + rad) / CELL) + GDIM / 2;
+            int z0 = (int)floorf((s->b[i].z - rad) / CELL) + GDIM / 2;
+            int z1 = (int)floorf((s->b[i].z + rad) / CELL) + GDIM / 2;
             int u, v;
-            if (cx < 1) cx = 1; if (cx > GDIM - 2) cx = GDIM - 2;
-            if (cz < 1) cz = 1; if (cz > GDIM - 2) cz = GDIM - 2;
-            for (u = cx - 1; u <= cx + 1; u++)
-                for (v = cz - 1; v <= cz + 1; v++) {
+            if (x0 < 0) x0 = 0;
+            if (z0 < 0) z0 = 0;
+            if (x1 > GDIM - 1) x1 = GDIM - 1;
+            if (z1 > GDIM - 1) z1 = GDIM - 1;
+            for (u = x0; u <= x1; u++)
+                for (v = z0; v <= z1; v++) {
                     int t, nn = nb[u][v];
                     for (t = 0; t < nn; t++)
                         if (buck[u][v][t] < i)
                             pair(&s->b[buck[u][v][t]], &s->b[i]);
+                    if (nb[u][v] < BUCK)
+                        buck[u][v][nb[u][v]++] = i;
                 }
-            if (nb[cx][cz] < BUCK)
-                buck[cx][cz][nb[cx][cz]++] = i;
         }
         joints(s);
         for (i = 0; i < s->n; i++) floor_hit(s, &s->b[i]);

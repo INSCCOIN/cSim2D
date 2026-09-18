@@ -105,35 +105,56 @@ static void quad(int *xs, int *ys, uint16_t c)
     tri(xs[0], ys[0], xs[2], ys[2], xs[3], ys[3], c);
 }
 
+static float sunlit(float nx, float ny, float nz)
+{
+    /* sun: (-0.35, 0.82, -0.45) */
+    float d = nx * -0.35f + ny * 0.82f + nz * -0.45f;
+    if (d < 0.f)
+        d = 0.f;
+    return 0.32f + 0.68f * d;
+}
+
 static void draw_box(const Sim *s, const SimBody *b, float depth)
 {
-    float c = cosf(b->yaw), si = sinf(b->yaw);
+    float cy = cosf(b->yaw), si = sinf(b->yaw);
+    float cp = cosf(b->pitch), sp = sinf(b->pitch);
+    float cr = cosf(b->roll), sr = sinf(b->roll);
     float hx = b->hx, hy = b->hy, hz = b->hz;
-    float P[8][3];
     int S[8][2], ok[8], i;
-    int faces[3][4] = {{4,5,6,7},{5,1,2,6},{4,0,3,7}}; /* top, +x-ish, +z-ish approx */
-    int lit[3] = {95, 70, 55};
-    /* 0..3 bottom, 4..7 top, local then yaw */
+    int faces[3][4] = {{4, 5, 6, 7}, {5, 1, 2, 6}, {4, 0, 3, 7}};
+    float fn[3][3] = {{0, 1, 0}, {1, 0, 0}, {0, 0, 1}};
     int corner[8][3] = {
-        {-1,-1,-1},{1,-1,-1},{1,-1,1},{-1,-1,1},
-        {-1, 1,-1},{1, 1,-1},{1, 1,1},{-1, 1,1}
+        {-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1},
+        {-1, 1, -1}, {1, 1, -1}, {1, 1, 1}, {-1, 1, 1}
     };
     for (i = 0; i < 8; i++) {
         float lx = corner[i][0] * hx, ly = corner[i][1] * hy, lz = corner[i][2] * hz;
-        float wx = b->x + lx * c - lz * si;
-        float wz = b->z + lx * si + lz * c;
-        P[i][0] = wx; P[i][1] = b->y + ly; P[i][2] = wz;
-        ok[i] = project(s, P[i][0], P[i][1], P[i][2], &S[i][0], &S[i][1], &depth);
+        float x1, y1, z1, x2, y2, z2;
+        /* roll X, pitch Z, yaw Y — small sit-flat angles */
+        y1 = ly * cr - lz * sr;
+        z1 = ly * sr + lz * cr;
+        x1 = lx;
+        x2 = x1 * cp + z1 * sp;
+        z2 = -x1 * sp + z1 * cp;
+        y2 = y1;
+        ok[i] = project(s, b->x + x2 * cy - z2 * si, b->y + y2,
+                        b->z + x2 * si + z2 * cy, &S[i][0], &S[i][1], &depth);
     }
     for (i = 0; i < 3; i++) {
         int xs[4], ys[4], k, good = 1;
+        float wx, wz, lit;
         for (k = 0; k < 4; k++) {
             int id = faces[i][k];
-            if (!ok[id]) good = 0;
-            xs[k] = S[id][0]; ys[k] = S[id][1];
+            if (!ok[id])
+                good = 0;
+            xs[k] = S[id][0];
+            ys[k] = S[id][1];
         }
+        wx = fn[i][0] * cy - fn[i][2] * si;
+        wz = fn[i][0] * si + fn[i][2] * cy;
+        lit = sunlit(wx, fn[i][1], wz);
         if (good)
-            quad(xs, ys, mixfog(pal(b->col, lit[i]), depth));
+            quad(xs, ys, mixfog(pal(b->col, (int)(lit * 100.f)), depth));
     }
 }
 
@@ -142,8 +163,15 @@ void sim_draw(const Sim *s)
     int i, j, n = s->n, ord[SIM_MAX];
     float depth[SIM_MAX];
     char buf[64];
-    fb_clear(rgb565(12, 16, 28));
-    fill(0, 0, (int)FB_W, (int)FB_H / 2 + 8, rgb565(16, 20, 34));
+    fb_clear(rgb565(8, 10, 22));
+    {
+        int y, hy = (int)FB_H / 2 + 8;
+        for (y = 0; y < hy; y++) {
+            float t = (float)y / (float)hy;
+            int r = (int)(10 + t * 40), g = (int)(14 + t * 50), b = (int)(32 + t * 55);
+            hline(0, y, (int)FB_W, rgb565(r, g, b));
+        }
+    }
     floor_mode7(s);
 
     for (i = 0; i < n; i++) {
@@ -163,7 +191,13 @@ void sim_draw(const Sim *s)
         const SimBody *b = &s->b[ord[i]];
         int sx, sy; float d;
         if (!project(s, b->x, 0.02f, b->z, &sx, &sy, &d)) continue;
-        disc(sx, sy, (int)(s->foc * b->r * 0.55f / d), mixfog(rgb565(18, 20, 16), d));
+        {
+            float lift = b->y - b->hy;
+            if (lift < 0.f)
+                lift = 0.f;
+            disc(sx, sy, (int)(s->foc * b->r * (0.45f + 0.12f * lift) / d),
+                 mixfog(rgb565(16, 18, 14), d + lift * 2.f));
+        }
     }
     for (i = 0; i < n; i++) {
         const SimBody *b = &s->b[ord[i]];

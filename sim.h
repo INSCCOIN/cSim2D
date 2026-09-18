@@ -7,8 +7,9 @@ enum { J_DIST = 0, J_HINGE = 1, J_SLIDE = 2 };
 typedef struct {
     float x, y, z;
     float vx, vy, vz;
-    float wy;          /* yaw rate */
-    float yaw;
+    float wy, wp, wr;  /* yaw / pitch / roll rate */
+    float yaw, pitch, roll;
+    float px, py, pz;  /* previous pose for sweep */
     float m, im, I, iI;
     float r, hx, hy, hz;
     float e, mu;
