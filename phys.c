@@ -163,12 +163,20 @@ static void resolve(SimBody *a, SimBody *b, float nx, float ny, float nz,
     if (!b->awake && !b->static_) wake(b);
     im = a->im + b->im;
     if (im <= 0.f) return;
-    a->x -= nx * pen * (a->im / im);
-    a->y -= ny * pen * (a->im / im);
-    a->z -= nz * pen * (a->im / im);
-    b->x += nx * pen * (b->im / im);
-    b->y += ny * pen * (b->im / im);
-    b->z += nz * pen * (b->im / im);
+    /* slop so contacts don't weld */
+    {
+        float corr = pen - 0.012f;
+        if (corr < 0.f)
+            corr = 0.f;
+        if (corr > 0.18f)
+            corr = 0.18f;
+        a->x -= nx * corr * (a->im / im);
+        a->y -= ny * corr * (a->im / im);
+        a->z -= nz * corr * (a->im / im);
+        b->x += nx * corr * (b->im / im);
+        b->y += ny * corr * (b->im / im);
+        b->z += nz * corr * (b->im / im);
+    }
     /* yaw lever in XZ */
     rax = px - a->x; raz = pz - a->z;
     rbx = px - b->x; rbz = pz - b->z;
@@ -177,7 +185,7 @@ static void resolve(SimBody *a, SimBody *b, float nx, float ny, float nz,
     rv = (b->vx - a->vx) * nx + (b->vy - a->vy) * ny + (b->vz - a->vz) * nz + wb - wa;
     if (rv > 0.f) return;
     e = fminf(a->e, b->e);
-    mu = fminf(a->mu, b->mu);
+    mu = fminf(a->mu, b->mu) * 0.55f;
     j = -(1.f + e) * rv / (im + 0.0001f);
     a->vx -= a->im * j * nx; a->vy -= a->im * j * ny; a->vz -= a->im * j * nz;
     b->vx += b->im * j * nx; b->vy += b->im * j * ny; b->vz += b->im * j * nz;
@@ -199,18 +207,63 @@ static void resolve(SimBody *a, SimBody *b, float nx, float ny, float nz,
 
 static int sphere_box(SimBody *sp, SimBody *bx)
 {
-    float lx, lz, cx, cz, qx, qz, wx, wz, dx, dy, dz, d, pen;
+    float lx, lz, ly, cx, cz, cy, wx, wz, dx, dy, dz, d, pen;
+    float nx, ny, nz, px, py, pz;
     local_xz(bx->yaw, sp->x - bx->x, sp->z - bx->z, &lx, &lz);
+    ly = sp->y - bx->y;
+    /* center inside the box: push out on the shallowest face */
+    if (fabsf(lx) <= bx->hx && fabsf(lz) <= bx->hz && fabsf(ly) <= bx->hy) {
+        float ex = bx->hx - fabsf(lx);
+        float ey = bx->hy - fabsf(ly);
+        float ez = bx->hz - fabsf(lz);
+        if (ex <= ey && ex <= ez) {
+            nx = (lx >= 0.f) ? 1.f : -1.f;
+            ny = 0;
+            nz = 0;
+            pen = ex + sp->r;
+        } else if (ey <= ez) {
+            nx = 0;
+            ny = (ly >= 0.f) ? 1.f : -1.f;
+            nz = 0;
+            pen = ey + sp->r;
+        } else {
+            nx = 0;
+            ny = 0;
+            nz = (lz >= 0.f) ? 1.f : -1.f;
+            pen = ez + sp->r;
+        }
+        /* n is box-local from center toward sphere; world it */
+        {
+            float wnx, wnz;
+            rot_xz(bx->yaw, nx, nz, &wnx, &wnz);
+            nx = wnx;
+            nz = wnz;
+        }
+        /* resolve expects n from a(sphere) to b(box) = -outward */
+        resolve(sp, bx, -nx, -ny, -nz, sp->x, sp->y, sp->z, pen);
+        return 1;
+    }
     cx = fmaxf(-bx->hx, fminf(bx->hx, lx));
     cz = fmaxf(-bx->hz, fminf(bx->hz, lz));
-    dy = fmaxf(bx->y - bx->hy, fminf(bx->y + bx->hy, sp->y));
+    cy = fmaxf(-bx->hy, fminf(bx->hy, ly));
     rot_xz(bx->yaw, cx, cz, &wx, &wz);
-    wx += bx->x; wz += bx->z;
-    dx = sp->x - wx; dy = sp->y - dy; dz = sp->z - wz;
+    wx += bx->x;
+    wz += bx->z;
+    py = bx->y + cy;
+    dx = sp->x - wx;
+    dy = sp->y - py;
+    dz = sp->z - wz;
     d = sqrtf(dx * dx + dy * dy + dz * dz);
-    if (d < 1e-5f || d >= sp->r) return 0;
+    if (d < 1e-5f || d >= sp->r)
+        return 0;
     pen = sp->r - d;
-    resolve(sp, bx, dx / d, dy / d, dz / d, wx, sp->y - dy, wz, pen);
+    /* n from sphere(a) to box(b) points toward the box */
+    nx = -dx / d;
+    ny = -dy / d;
+    nz = -dz / d;
+    px = wx;
+    pz = wz;
+    resolve(sp, bx, nx, ny, nz, px, py, pz, pen);
     return 1;
 }
 
